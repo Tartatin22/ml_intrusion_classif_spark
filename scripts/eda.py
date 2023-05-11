@@ -1,4 +1,12 @@
 
+"""
+
+JOANNY Marion, BAZIRE Martin
+
+Data exploration
+
+"""
+
 def main():
     pass
 
