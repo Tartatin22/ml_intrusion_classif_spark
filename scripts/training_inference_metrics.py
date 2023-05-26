@@ -1,19 +1,31 @@
+"""
+JOANNY Marion
+BAZIRE Martin
+
+"""
+import matplotlib.pyplot as plt
+#  imports
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import udf
-from pyspark.ml import Pipeline
-from pyspark.ml.feature import VectorAssembler, VectorIndexer, OneHotEncoder, StringIndexer
+from pyspark.sql.types import FloatType
+
+from pyspark.mllib.evaluation import MulticlassMetrics
+from pyspark.ml.feature import VectorAssembler, OneHotEncoder, StringIndexer
 from pyspark.ml.classification import RandomForestClassifier
 
+
+#  const
 PATH_TRAINING_DATASET = "../NSL-KDD/KDDTrain+.txt"
 PATH_TEST_DATASET = "../NSL-KDD/KDDTest+.txt"
+
 columns = ['duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes', 'land', 'wrong_fragment',
-            'urgent', 'hot', 'num_failed_logins', 'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
-            'num_root', 'num_file_creations', 'num_shells', 'num_access_files', 'num_outbound_cmds', 'is_host_login',
-            'is_guest_login', 'count', 'srv_count', 'serror_rate', 'srv_serror_rate', 'rerror_rate', 'srv_rerror_rate',
-            'same_srv_rate', 'diff_srv_rate', 'srv_diff_host_rate', 'dst_host_count', 'dst_host_srv_count',
-            'dst_host_same_srv_rate', 'dst_host_diff_srv_rate', 'dst_host_same_src_port_rate',
-            'dst_host_srv_diff_host_rate', 'dst_host_serror_rate', 'dst_host_srv_serror_rate',
-            'dst_host_rerror_rate', 'dst_host_srv_rerror_rate', 'attack', 'level']
+           'urgent', 'hot', 'num_failed_logins', 'logged_in', 'num_compromised', 'root_shell', 'su_attempted',
+           'num_root', 'num_file_creations', 'num_shells', 'num_access_files', 'num_outbound_cmds', 'is_host_login',
+           'is_guest_login', 'count', 'srv_count', 'serror_rate', 'srv_serror_rate', 'rerror_rate', 'srv_rerror_rate',
+           'same_srv_rate', 'diff_srv_rate', 'srv_diff_host_rate', 'dst_host_count', 'dst_host_srv_count',
+           'dst_host_same_srv_rate', 'dst_host_diff_srv_rate', 'dst_host_same_src_port_rate',
+           'dst_host_srv_diff_host_rate', 'dst_host_serror_rate', 'dst_host_srv_serror_rate',
+           'dst_host_rerror_rate', 'dst_host_srv_rerror_rate', 'attack', 'level']
 
 
 def is_attack(c):
@@ -21,70 +33,91 @@ def is_attack(c):
 
 
 def main():
-    #  create session
+    #  create spark session
     spark = SparkSession.builder.appName('NSL_KDD_classify').getOrCreate()
 
-    stages = []
-
-    #  read csv file using spark.read
-    df = spark.read.options(delimiter=',').option("header", False).option("inferSchema", True)\
+    #  concat train and test for preprocess
+    df = spark.read.options(delimiter=',').option("header", False).option("inferSchema", True) \
         .csv(PATH_TRAINING_DATASET).union(spark.read.options(delimiter=',')
-                .option("header", False).option("inferSchema", True).csv(PATH_TEST_DATASET))
-    df.show(1)
-    df.printSchema()
-    print("before")
+                                          .option("header", False).option("inferSchema", True).csv(PATH_TEST_DATASET))
 
     #  add columns names
     for i in range(len(columns)):
         df = df.withColumnRenamed("_c" + str(i), columns[i])
 
-    #  attack_flag
-    udf_is_attack = udf(is_attack)
-    df = df.withColumn("label", udf_is_attack("attack").cast('int'))
-    columns.remove("attack")
+    print("Data preview :")
+    df.show(1)
 
-    #  string indexer on all columns
-    indexed_columns = [c + "_idx" for c in columns]
-    stages.append(StringIndexer(inputCols=columns, outputCols=indexed_columns))
+    #  encode attack with boolean flag
+    udf_is_attack = udf(is_attack)
+    df = df.withColumn("attack", udf_is_attack("attack").cast('int'))
+
+    print("Data with attack column boolean encode :")
+    df.show(1)
+
+    #  get text cols
+    string_cols = [col[0] for col in df.dtypes if col[1] == "string"]
+    string_cols_idx = [col + "_index" for col in string_cols]
+
+    #  fit a string indexer on text cols
+    model = StringIndexer(inputCols=string_cols, outputCols=string_cols_idx).fit(df)
+
+    #  inference on string indexer
+    df = model.transform(df)
+
+    #  fit a encoder model on indexed cols
+    encoded_cols = [col + "_encoded" for col in string_cols_idx]
+    model = OneHotEncoder(inputCols=string_cols_idx, outputCols=encoded_cols).fit(df)
+
+    #  inference on encoder
+    df = model.transform(df)
+
+    print("data with indexed column encoded :")
+    df.show(1)
 
     #  columns to vectorize
-    columns_to_vectorize = indexed_columns
+    features_cols = columns
+    features_cols.remove("attack")
+    for c in string_cols:
+        features_cols.remove(c)
+    for c in encoded_cols:
+        features_cols.append(c)
 
-    #  encoding cat variable
-    for col_to_encode in ["protocol_type", "service", "flag"]:
+    #  vectorize model
+    model = VectorAssembler(inputCols=features_cols, outputCol='features')
 
-        idx_col = col_to_encode + "_idx"
-        columns_to_vectorize.remove(idx_col)
+    #  inference on vectorize model
+    df = model.transform(df)
 
-        vect_col = col_to_encode + "_vect"
-        columns_to_vectorize.append(vect_col)
+    print("data with feature vector :")
+    df.show(1)
 
-        #  one-hot-encoding
-        stages.append(OneHotEncoder(inputCol=idx_col, outputCol=vect_col))
+    #  ml model
+    model = RandomForestClassifier(featuresCol="features", labelCol='attack')
 
-    #  vectorize
-    stages.append(VectorAssembler(inputCols=columns_to_vectorize, outputCol='features'))
+    #  split train test dataset
+    train_df, test_df = df.randomSplit([0.8, 0.2])
 
-    #  execute pipeline
-    pipeline = Pipeline(stages=stages)
-
-    data = pipeline.fit(df).transform(df)
-
-    data.printSchema()
-
-    model = RandomForestClassifier(
-        maxBins=10000,
-        featuresCol='features', labelCol='label')
-
-    train_df, test_df = data.randomSplit([0.8, 0.2])
-
-    print("features")
-    train_df.select("features").show(1, truncate=False)
-
+    #  fit model
     fitted_model = model.fit(train_df)
+
+    #  inference
     predictions = fitted_model.transform(test_df)
-    print("columns : ", predictions.columns)
-    predictions.select("label", "prediction").show(10)
+
+    #  cast to float
+    predictions = predictions.withColumn("prediction", predictions["prediction"].cast(FloatType()))
+    predictions = predictions.withColumn("attack", predictions["attack"].cast(FloatType()))
+
+    #  put prediction and truth together in tuple
+    truth_pred = predictions.select(["attack", "prediction"]).rdd.map(tuple)
+
+    #  calc metrics
+    metrics = MulticlassMetrics(truth_pred)
+
+    print("Confusion matrix : ", metrics.confusionMatrix().toArray())
+    print("Accuracy : ", metrics.accuracy)
+    print("False positive rate : ", metrics.weightedFalsePositiveRate)
+    print("True positive rate : ", metrics.weightedTruePositiveRate)
     return
 
 
