@@ -1,3 +1,2 @@
 pyspark
-numpy
-pandas
+mlxtend
