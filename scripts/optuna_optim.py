@@ -13,7 +13,24 @@ from pyspark.mllib.evaluation import MulticlassMetrics
 from pyspark.ml.feature import VectorAssembler, OneHotEncoder, StringIndexer
 from pyspark.ml.classification import RandomForestClassifier
 
+import optuna
 
+
+def objective(trial, train_df, test_df):
+    maxDepth = trial.suggest_int("max_depth", 2, 30)
+    maxBins = trial.suggest_int("max_bins", 10, 300)
+
+    model = RandomForestClassifier(featuresCol="features", labelCol='attack',
+                                   maxBins=maxBins,
+                                   maxDepth=maxDepth)
+
+    fitted_model = model.fit(train_df)
+    predictions = fitted_model.transform(test_df)
+    predictions = predictions.withColumn("prediction", predictions["prediction"].cast(FloatType()))
+    predictions = predictions.withColumn("attack", predictions["attack"].cast(FloatType()))
+    truth_pred = predictions.select(["attack", "prediction"]).rdd.map(tuple)
+    metrics = MulticlassMetrics(truth_pred)
+    return metrics.accuracy
 
 
 #  const
@@ -94,13 +111,19 @@ def main():
     print("data with feature vector :")
     df.show(1)
 
-    #  ml model
-    model = RandomForestClassifier(featuresCol="features", labelCol='attack',
-                                   maxDepth=18,
-                                   maxBins=202)
-
     #  split train test dataset
     train_df, test_df = df.randomSplit([0.8, 0.2])
+
+    #  tricks to have args
+    f = lambda trial: objective(trial, train_df, test_df)
+
+    # Pass func to Optuna studies
+    study = optuna.create_study(direction='maximize')
+    study.optimize(f, n_trials=20)
+    print("best value, best params : ", study.best_value, study.best_params)
+    return
+    #  ml model
+    model = RandomForestClassifier(featuresCol="features", labelCol='attack')
 
     #  fit model
     fitted_model = model.fit(train_df)
